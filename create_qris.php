@@ -74,9 +74,9 @@ $action = isset($_GET['action']) ? $_GET['action'] : '';
 
 // 0. ENDPOINT GAMBAR QR DINAMIS LANGSUNG
 if ($action === 'qr_image') {
-    $amount = isset($_GET['amount']) ? (int)$_GET['amount'] : 10000;
+    $amount = isset($_GET['amount']) ? (int)$_GET['amount'] : (isset($_GET['nominal']) ? (int)$_GET['nominal'] : (isset($_GET['poin']) ? (int)$_GET['poin'] * 1000 : 10000));
     $dynPayload = convert_qris_to_dynamic($PANITIA_QRIS_RAW, $amount);
-    $targetUrl = 'https://api.qrserver.com/v1/create-qr-code/?size=350x350&margin=8&data=' . rawurlencode($dynPayload);
+    $targetUrl = 'https://api.qrserver.com/v1/create-qr-code/?size=350x350&margin=8&data=' . rawurlencode($dynPayload) . '&_t=' . time();
     header("Location: " . $targetUrl);
     exit();
 }
@@ -147,6 +147,7 @@ $namaPemilih = isset($formData['namaPemilih']) ? trim($formData['namaPemilih']) 
 $noWa = isset($formData['noWa']) ? trim($formData['noWa']) : '';
 $kandidatId = isset($formData['kandidatId']) ? trim($formData['kandidatId']) : '';
 $kandidatNama = isset($formData['kandidatNama']) ? trim($formData['kandidatNama']) : $kandidatId;
+$inputNominal = isset($formData['nominal']) ? (int)$formData['nominal'] : 0;
 $pilihanPaket = isset($formData['pilihanPaket']) ? (int)$formData['pilihanPaket'] : 20;
 
 // Tabel Pemetaan Resmi Paket Poin ke Harga Riil (Murni Flat tanpa kode unik / tambahan sepeser pun)
@@ -158,7 +159,14 @@ $PAKET_HARGA_MAP = [
     550  => 500000,
     1100 => 1000000
 ];
-$nominal = isset($PAKET_HARGA_MAP[$pilihanPaket]) ? $PAKET_HARGA_MAP[$pilihanPaket] : ($pilihanPaket * 1000);
+
+if ($inputNominal > 0) {
+    $nominal = $inputNominal;
+} else if (isset($PAKET_HARGA_MAP[$pilihanPaket])) {
+    $nominal = $PAKET_HARGA_MAP[$pilihanPaket];
+} else {
+    $nominal = $pilihanPaket * 1000;
+}
 
 if (empty($namaPemilih) || empty($noWa) || empty($kandidatId)) {
     echo json_encode(['success' => false, 'message' => 'Nama pemilih, nomor WhatsApp, dan pilihan kandidat wajib diisi.']);
@@ -189,7 +197,7 @@ notifyGasWebhook($GAS_WEBAPP_URL, [
 
 // Generate QRIS Dinamis On-the-Fly dengan nominal pas sesuai paket dukungan
 $dynamicQrisPayload = convert_qris_to_dynamic($PANITIA_QRIS_RAW, $nominal);
-$dynamicQrisImageUrl = 'https://api.qrserver.com/v1/create-qr-code/?size=350x350&margin=8&data=' . rawurlencode($dynamicQrisPayload);
+$dynamicQrisImageUrl = 'https://api.qrserver.com/v1/create-qr-code/?size=350x350&margin=8&data=' . rawurlencode($dynamicQrisPayload) . '&_t=' . time();
 
 // Berikan respon QRIS Dinamis Panitia langsung ke frontend
 echo json_encode([
