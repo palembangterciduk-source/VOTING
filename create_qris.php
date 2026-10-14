@@ -1,8 +1,8 @@
 <?php
 /**
- * create_qris.php - Direct Payment Gateway Gateway KlikQRIS
+ * create_qris.php - Sistem Pembayaran Scan QRIS Biasa (Manual Verification)
  * Dijalankan di Hostinger (https://bgkupgri.palembangterciduk.com/create_qris.php)
- * Mem-bypass limitasi OAuth Google Apps Script tanpa mengubah fitur & tampilan apapun.
+ * Terhubung langsung ke Google Apps Script tanpa ketergantungan Payment Gateway KlikQRIS.
  */
 
 header("Access-Control-Allow-Origin: *");
@@ -16,14 +16,72 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     exit();
 }
 
-$KLIKQRIS_API_KEY = 'fd38HRdJgYsNLQk8ZRz5FaP860bPw4nGX3TuCHYR';
-$KLIKQRIS_MERCHANT_ID = '179125363122';
-$KLIKQRIS_BASE_URL = 'https://klikqris.com/api';
 $GAS_WEBAPP_URL = 'https://script.google.com/macros/s/AKfycbwgn-8zTivAYo47TQwFaPY1Ys69yzp3RuTFvKvkAZXmuoWpCmEulZeiulWKJkVZGxgD/exec';
+$PANITIA_QRIS_URL = 'https://lh3.googleusercontent.com/d/1LqJtNB0HVcAi37xzMN0cnQuUt-PnaAS3';
+$PANITIA_QRIS_RAW = '00020101021126570011ID.DANA.WWW011893600915301065867502090106586750303UMI51440014ID.CO.QRIS.WWW0215ID10254542664420303UMI5204541153033605802ID5914Jeslin bucket 600436116105306546304F666';
+
+/**
+ * Hitung Checksum CRC16-CCITT (False) standar EMVCo / ASPI QRIS
+ */
+function qris_crc16($str) {
+    $crc = 0xFFFF;
+    $len = strlen($str);
+    for ($c = 0; $c < $len; $c++) {
+        $crc ^= (ord($str[$c]) << 8);
+        for ($i = 0; $i < 8; $i++) {
+            if ($crc & 0x8000) {
+                $crc = (($crc << 1) ^ 0x1021) & 0xFFFF;
+            } else {
+                $crc = ($crc << 1) & 0xFFFF;
+            }
+        }
+    }
+    return sprintf('%04X', $crc);
+}
+
+/**
+ * Konversi String QRIS Statis Panitia menjadi QRIS Dinamis On-the-Fly
+ */
+function convert_qris_to_dynamic($staticQris, $amount) {
+    if (empty($staticQris)) return '';
+    $step1 = substr($staticQris, 0, -4);
+    if (substr($step1, -4) === "6304") {
+        $step1 = substr($step1, 0, -4);
+    }
+    // Ubah mode Tag 01 dari 11 (Statis) ke 12 (Dinamis)
+    $step2 = str_replace("010211", "010212", $step1);
+    
+    // Tag 54: Transaction Amount
+    $amountStr = (string)(int)$amount;
+    $amountLen = str_pad(strlen($amountStr), 2, "0", STR_PAD_LEFT);
+    $tag54 = "54" . $amountLen . $amountStr;
+    
+    // Sisipkan sebelum Tag 58 (Country Code: 5802ID)
+    $pos58 = strpos($step2, "5802ID");
+    if ($pos58 !== false) {
+        $step3 = substr($step2, 0, $pos58) . $tag54 . substr($step2, $pos58);
+    } else {
+        $step3 = $step2 . $tag54;
+    }
+    
+    // Hitung ulang CRC16
+    $payloadForCrc = $step3 . "6304";
+    $crc = qris_crc16($payloadForCrc);
+    return $payloadForCrc . $crc;
+}
 
 $action = isset($_GET['action']) ? $_GET['action'] : '';
 
-// 0. PROXY DATA REALTIME GOOGLE APPS SCRIPT
+// 0. ENDPOINT GAMBAR QR DINAMIS LANGSUNG
+if ($action === 'qr_image') {
+    $amount = isset($_GET['amount']) ? (int)$_GET['amount'] : 10000;
+    $dynPayload = convert_qris_to_dynamic($PANITIA_QRIS_RAW, $amount);
+    $targetUrl = 'https://api.qrserver.com/v1/create-qr-code/?size=350x350&margin=8&data=' . rawurlencode($dynPayload);
+    header("Location: " . $targetUrl);
+    exit();
+}
+
+// 1. PROXY DATA REALTIME DARI GOOGLE APPS SCRIPT
 if ($action === 'get_data') {
     $ch = curl_init($GAS_WEBAPP_URL . '?action=get_data');
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
@@ -42,91 +100,43 @@ if ($action === 'get_data') {
     exit();
 }
 
-// 1. CEK STATUS TRANSAKSI
-if ($action === 'status') {
+// 2. PROXY APPROVAL ADMIN KE GOOGLE APPS SCRIPT
+if ($action === 'approve_vote') {
     $txId = isset($_GET['txId']) ? trim($_GET['txId']) : '';
     if (empty($txId)) {
-        echo json_encode(['success' => false, 'paymentStatus' => 'UNKNOWN', 'message' => 'txId wajib diisi.']);
+        echo json_encode(['success' => false, 'message' => 'txId wajib diisi.']);
         exit();
     }
-
-    $ch = curl_init($KLIKQRIS_BASE_URL . '/qris/status/' . urlencode($txId));
+    $ch = curl_init($GAS_WEBAPP_URL . '?action=approve_vote&txId=' . urlencode($txId));
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
     curl_setopt($ch, CURLOPT_TIMEOUT, 15);
     curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-    curl_setopt($ch, CURLOPT_HTTPHEADER, [
-        'x-api-key: ' . $KLIKQRIS_API_KEY,
-        'id_merchant: ' . $KLIKQRIS_MERCHANT_ID
-    ]);
-
     $resText = curl_exec($ch);
-    $resCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
     curl_close($ch);
-
-    $resJson = json_decode($resText, true);
-    $isSuccess = ($resCode >= 200 && $resCode < 300) && $resJson && isset($resJson['data']);
-
-    if ($isSuccess) {
-        $rawStatus = strtolower($resJson['data']['status'] ?? $resJson['data']['payment_status'] ?? '');
-        $isPaid = ($rawStatus === 'paid' || $rawStatus === 'success' || $rawStatus === 'settlement' || $rawStatus === 'completed' || $rawStatus === 'berhasil')
-                  || (isset($resJson['data']['is_paid']) && $resJson['data']['is_paid'] == true)
-                  || !empty($resJson['data']['paid_at']);
-        if ($isPaid) {
-            // Ambil cache data kandidat jika ada
-            $cacheFile = __DIR__ . '/tx_cache.json';
-            $extraData = [];
-            if (file_exists($cacheFile)) {
-                $cached = json_decode(@file_get_contents($cacheFile), true) ?: [];
-                $extraData = $cached[$txId] ?? [];
-            }
-
-            // Beritahu Google Apps Script Webhook untuk update sheet & poin
-            notifyGasWebhook($GAS_WEBAPP_URL, array_merge([
-                'action' => 'update_status',
-                'order_id' => $txId,
-                'transaksiId' => $txId,
-                'status' => 'paid'
-            ], $extraData));
-
-            echo json_encode([
-                'success' => true,
-                'paymentStatus' => 'PAID',
-                'message' => 'Pembayaran telah sukses diverifikasi.'
-            ]);
-            exit();
-        } else if ($rawStatus === 'pending') {
-            echo json_encode([
-                'success' => true,
-                'paymentStatus' => 'PENDING',
-                'message' => 'Menunggu pembayaran...'
-            ]);
-            exit();
-        } else if ($rawStatus === 'expired') {
-            echo json_encode([
-                'success' => true,
-                'paymentStatus' => 'EXPIRED',
-                'message' => 'Waktu pembayaran telah habis.'
-            ]);
-            exit();
-        } else if ($rawStatus === 'failed') {
-            echo json_encode([
-                'success' => true,
-                'paymentStatus' => 'FAILED',
-                'message' => 'Pembayaran gagal.'
-            ]);
-            exit();
-        }
-    }
-
-    echo json_encode([
-        'success' => true,
-        'paymentStatus' => 'PENDING',
-        'message' => 'Menunggu verifikasi status...'
-    ]);
+    echo !empty($resText) ? $resText : json_encode(['success' => true, 'message' => 'Transaksi berhasil disetujui.']);
     exit();
 }
 
-// 2. PEMBUATAN QRIS BARU (POST)
+// 3. PROXY REJECT ADMIN KE GOOGLE APPS SCRIPT
+if ($action === 'reject_vote') {
+    $txId = isset($_GET['txId']) ? trim($_GET['txId']) : '';
+    if (empty($txId)) {
+        echo json_encode(['success' => false, 'message' => 'txId wajib diisi.']);
+        exit();
+    }
+    $ch = curl_init($GAS_WEBAPP_URL . '?action=reject_vote&txId=' . urlencode($txId));
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 15);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    $resText = curl_exec($ch);
+    curl_close($ch);
+    echo !empty($resText) ? $resText : json_encode(['success' => true, 'message' => 'Transaksi berhasil ditolak.']);
+    exit();
+}
+
+// 4. PENDAFTARAN TRANSAKSI VOTE BARU (POST) - STATUS AWAL PENDING
 $rawInput = file_get_contents('php://input');
 $formData = json_decode($rawInput, true);
 if (!$formData && !empty($_POST)) {
@@ -138,98 +148,58 @@ $noWa = isset($formData['noWa']) ? trim($formData['noWa']) : '';
 $kandidatId = isset($formData['kandidatId']) ? trim($formData['kandidatId']) : '';
 $kandidatNama = isset($formData['kandidatNama']) ? trim($formData['kandidatNama']) : $kandidatId;
 $pilihanPaket = isset($formData['pilihanPaket']) ? (int)$formData['pilihanPaket'] : 20;
-$nominal = isset($formData['nominal']) ? (int)$formData['nominal'] : 20000;
 
-// Format TransaksiID Sekuensial / Random Unik Harian
-$transaksiId = 'VOTE-' . date('Ymd') . '-' . sprintf('%04d', mt_rand(1, 9999));
-
-// Request ke API KlikQRIS
-$payload = [
-    'order_id' => $transaksiId,
-    'amount' => $nominal,
-    'id_merchant' => $KLIKQRIS_MERCHANT_ID,
-    'keterangan' => 'Vote ' . $kandidatNama . ' (' . $pilihanPaket . ' Poin)'
+// Tabel Pemetaan Resmi Paket Poin ke Harga Riil (Murni Flat tanpa kode unik / tambahan sepeser pun)
+$PAKET_HARGA_MAP = [
+    10   => 10000,
+    20   => 20000,
+    50   => 50000,
+    105  => 100000,
+    550  => 500000,
+    1100 => 1000000
 ];
+$nominal = isset($PAKET_HARGA_MAP[$pilihanPaket]) ? $PAKET_HARGA_MAP[$pilihanPaket] : ($pilihanPaket * 1000);
 
-$ch = curl_init($KLIKQRIS_BASE_URL . '/qris/create');
-curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-curl_setopt($ch, CURLOPT_POST, true);
-curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($payload));
-curl_setopt($ch, CURLOPT_TIMEOUT, 20);
-curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-curl_setopt($ch, CURLOPT_HTTPHEADER, [
-    'Content-Type: application/json',
-    'x-api-key: ' . $KLIKQRIS_API_KEY,
-    'id_merchant: ' . $KLIKQRIS_MERCHANT_ID
-]);
-
-$response = curl_exec($ch);
-$resCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-curl_close($ch);
-
-$resJson = json_decode($response, true);
-$isSuccess = ($resCode >= 200 && $resCode < 300) && $resJson && ($resJson['status'] === true || $resJson['status'] === 'success') && isset($resJson['data']);
-
-if ($isSuccess) {
-    $finalAmount = isset($resJson['data']['total_amount']) ? (int)$resJson['data']['total_amount'] : (isset($resJson['data']['amount']) ? (int)$resJson['data']['amount'] : $nominal);
-    $qrisImage = $resJson['data']['qris_image'] ?? $resJson['data']['qris_url'] ?? '';
-    $qrisUrl = $resJson['data']['qris_url'] ?? '';
-
-    // Simpan cache transaksi lokal di Hostinger
-    $cacheFile = __DIR__ . '/tx_cache.json';
-    $cached = [];
-    if (file_exists($cacheFile)) {
-        $cached = json_decode(@file_get_contents($cacheFile), true) ?: [];
-    }
-    if (count($cached) > 100) {
-        $cached = array_slice($cached, -50, null, true);
-    }
-    $cached[$transaksiId] = [
-        'transaksiId' => $transaksiId,
-        'order_id' => $transaksiId,
-        'namaPemilih' => $namaPemilih,
-        'noWa' => $noWa,
-        'kandidatId' => $kandidatId,
-        'pilihanPaket' => $pilihanPaket,
-        'nominal' => $finalAmount
-    ];
-    @file_put_contents($cacheFile, json_encode($cached));
-
-    // Catat baris transaksi ke Google Apps Script di background
-    notifyGasWebhook($GAS_WEBAPP_URL, [
-        'action' => 'record_vote',
-        'transaksiId' => $transaksiId,
-        'order_id' => $transaksiId,
-        'namaPemilih' => $namaPemilih,
-        'noWa' => $noWa,
-        'kandidatId' => $kandidatId,
-        'pilihanPaket' => $pilihanPaket,
-        'nominal' => $finalAmount
-    ]);
-
-    echo json_encode([
-        'success' => true,
-        'transaksiId' => $transaksiId,
-        'qrisImage' => $qrisImage,
-        'qrisUrl' => $qrisUrl,
-        'qrisData' => $resJson['data']['qris_data'] ?? '',
-        'amount' => $finalAmount,
-        'expiredAt' => $resJson['data']['expired_at'] ?? '',
-        'message' => 'QRIS dinamis berhasil dibuat.'
-    ]);
+if (empty($namaPemilih) || empty($noWa) || empty($kandidatId)) {
+    echo json_encode(['success' => false, 'message' => 'Nama pemilih, nomor WhatsApp, dan pilihan kandidat wajib diisi.']);
     exit();
 }
 
-// Fallback jika API sedang maintenance
-$fallbackQris = 'https://lh3.googleusercontent.com/d/1LqJtNB0HVcAi37xzMN0cnQuUt-PnaAS3';
+// Generate ID Transaksi Sekuensial Berbasis Tanggal (VOTE-YYYYMMDD-XXXX)
+$todayStr = date('Ymd');
+$counterFile = __DIR__ . '/counter_' . $todayStr . '.txt';
+$seq = 1;
+if (file_exists($counterFile)) {
+    $seq = (int)@file_get_contents($counterFile) + 1;
+}
+@file_put_contents($counterFile, (string)$seq);
+$transaksiId = 'VOTE-' . $todayStr . '-' . str_pad($seq, 4, '0', STR_PAD_LEFT);
+
+// Catat baris transaksi ke Google Apps Script (Status PENDING murni, poin tidak bertambah)
+notifyGasWebhook($GAS_WEBAPP_URL, [
+    'action' => 'record_vote',
+    'transaksiId' => $transaksiId,
+    'order_id' => $transaksiId,
+    'namaPemilih' => $namaPemilih,
+    'noWa' => $noWa,
+    'kandidatId' => $kandidatId,
+    'pilihanPaket' => $pilihanPaket,
+    'nominal' => $nominal
+]);
+
+// Generate QRIS Dinamis On-the-Fly dengan nominal pas sesuai paket dukungan
+$dynamicQrisPayload = convert_qris_to_dynamic($PANITIA_QRIS_RAW, $nominal);
+$dynamicQrisImageUrl = 'https://api.qrserver.com/v1/create-qr-code/?size=350x350&margin=8&data=' . rawurlencode($dynamicQrisPayload);
+
+// Berikan respon QRIS Dinamis Panitia langsung ke frontend
 echo json_encode([
     'success' => true,
     'transaksiId' => $transaksiId,
-    'qrisImage' => $fallbackQris,
-    'qrisUrl' => $fallbackQris,
+    'qrisImage' => $dynamicQrisImageUrl,
+    'qrisUrl' => $dynamicQrisImageUrl,
+    'qrisData' => $dynamicQrisPayload,
     'amount' => $nominal,
-    'isFallback' => true,
-    'message' => 'QRIS panitia siap. Silakan scan untuk menyelesaikan pembayaran.'
+    'message' => 'Transaksi vote berhasil dicatat (PENDING). Silakan transfer dan kirim bukti pembayaran ke WhatsApp Admin.'
 ]);
 exit();
 
